@@ -168,6 +168,21 @@ def response_field_name(response_format: str) -> str:
     return {"url": "url", "base64": "base64"}.get(response_format, "b64_json")
 
 
+def _merge_image_metadata(
+    images: List[str],
+    response_field: str,
+    metadata: Optional[List[dict]] = None,
+) -> List[dict]:
+    items: List[dict] = []
+    meta_list = metadata or []
+    for idx, img in enumerate(images):
+        item = {response_field: img}
+        if idx < len(meta_list) and isinstance(meta_list[idx], dict):
+            item.update(meta_list[idx])
+        items.append(item)
+    return items
+
+
 def resolve_aspect_ratio(size: str) -> str:
     """Map OpenAI size to Grok Imagine aspect ratio."""
     value = (size or "").strip()
@@ -298,7 +313,11 @@ async def create_image(request: ImageGenerationRequest):
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
 
-    data = [{response_field: img} for img in result.data]
+    data = _merge_image_metadata(
+        result.data,
+        response_field,
+        getattr(result, "metadata", None),
+    )
     usage = result.usage_override or {
         "total_tokens": 0,
         "input_tokens": 0,
@@ -433,7 +452,11 @@ async def edit_image(
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
 
-    data = [{response_field: img} for img in result.data]
+    data = _merge_image_metadata(
+        result.data,
+        response_field,
+        getattr(result, "metadata", None),
+    )
 
     return JSONResponse(
         content={

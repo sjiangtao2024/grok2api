@@ -8,7 +8,7 @@ import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncGenerator, AsyncIterable, Dict, List, Optional, Union
+from typing import Any, AsyncGenerator, AsyncIterable, Dict, List, Optional, Tuple, Union
 
 import orjson
 
@@ -31,6 +31,7 @@ image_service = ImagineWebSocketReverse()
 class ImageGenerationResult:
     stream: bool
     data: Union[AsyncGenerator[str, None], List[str]]
+    metadata: Optional[List[dict]] = None
     usage_override: Optional[dict] = None
 
 
@@ -237,6 +238,7 @@ class ImageGenerationService:
         if enable_nsfw is None:
             enable_nsfw = bool(get_config("image.nsfw"))
         all_images: List[str] = []
+        all_metadata: Dict[str, Dict[str, object]] = {}
         seen = set()
         expected_per_call = 6
         calls_needed = max(1, int(math.ceil(n / expected_per_call)))
@@ -272,10 +274,12 @@ class ImageGenerationService:
             if isinstance(batch, Exception):
                 logger.warning(f"WS batch failed: {batch}")
                 continue
-            for img in batch:
+            batch_images, batch_metadata = batch
+            for img, meta in zip(batch_images, batch_metadata):
                 if img not in seen:
                     seen.add(img)
                     all_images.append(img)
+                    all_metadata[img] = meta
                 if len(all_images) >= n:
                     break
             if len(all_images) >= n:
@@ -332,10 +336,12 @@ class ImageGenerationService:
                     if isinstance(batch, Exception):
                         logger.warning(f"WS recovery batch failed: {batch}")
                         continue
-                    for img in batch:
+                    batch_images, batch_metadata = batch
+                    for img, meta in zip(batch_images, batch_metadata):
                         if img not in seen:
                             seen.add(img)
                             all_images.append(img)
+                            all_metadata[img] = meta
                         if len(all_images) >= n:
                             break
                     if len(all_images) >= n:
@@ -365,6 +371,7 @@ class ImageGenerationService:
             logger.warning(f"Failed to consume token: {e}")
 
         selected = self._select_images(all_images, n)
+        selected_metadata = [all_metadata.get(img, {}) for img in selected if img != "error"]
         usage_override = {
             "total_tokens": 0,
             "input_tokens": 0,
@@ -372,7 +379,7 @@ class ImageGenerationService:
             "input_tokens_details": {"text_tokens": 0, "image_tokens": 0},
         }
         return ImageGenerationResult(
-            stream=False, data=selected, usage_override=usage_override
+            stream=False, data=selected, metadata=selected_metadata, usage_override=usage_override
         )
 
     @staticmethod
@@ -484,6 +491,24 @@ class ImageWSBaseProcessor(BaseProcessor):
         if incoming.get("blob_size", 0) > existing.get("blob_size", 0):
             return incoming
         return existing
+
+    @staticmethod
+    def _metadata_fields(item: Dict) -> Dict[str, object]:
+        metadata: Dict[str, object] = {}
+        for key in (
+            "width",
+            "height",
+            "model_name",
+            "percentage_complete",
+            "job_id",
+            "request_id",
+            "order",
+            "full_prompt",
+        ):
+            value = item.get(key)
+            if value is not None:
+                metadata[key] = value
+        return metadata
 
     async def _to_output(self, image_id: str, item: Dict) -> str:
         try:
@@ -642,6 +667,7 @@ class ImageWSStreamProcessor(ImageWSBaseProcessor):
                             "partial_image_index": partial_index,
                             "image_id": image_id,
                             "stage": stage,
+                            **self._metadata_fields(item),
                         },
                     )
 
@@ -724,6 +750,7 @@ class ImageWSStreamProcessor(ImageWSBaseProcessor):
                         "index": index,
                         "image_id": image_id,
                         "stage": "final",
+                        **self._metadata_fields(item),
                         "usage": {
                             "total_tokens": 0,
                             "input_tokens": 0,
@@ -760,7 +787,7 @@ class ImageWSCollectProcessor(ImageWSBaseProcessor):
         super().__init__(model, token, response_format)
         self.n = n
 
-    async def process(self, response: AsyncIterable[dict]) -> List[str]:
+    async def process(self, response: AsyncIterable[dict]) -> Tuple[List[str], List[Dict[str, object]]]:
         images: Dict[str, Dict] = {}
 
         async for item in response:
@@ -783,12 +810,14 @@ class ImageWSCollectProcessor(ImageWSBaseProcessor):
             selected = selected[: self.n]
 
         results: List[str] = []
+        metadata: List[Dict[str, object]] = []
         for item in selected:
             output = await self._to_output(item.get("image_id", ""), item)
             if output:
                 results.append(output)
+                metadata.append(self._metadata_fields(item))
 
-        return results
+        return results, metadata
 
 
 __all__ = ["ImageGenerationService"]

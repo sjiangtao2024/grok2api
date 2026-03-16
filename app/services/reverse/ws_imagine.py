@@ -54,7 +54,27 @@ class ImagineWebSocketReverse:
         # images being treated as final outputs.
         return decoded_size >= final_min_bytes
 
-    def _classify_image(self, url: str, blob: str, final_min_bytes: int, medium_min_bytes: int) -> Optional[Dict[str, object]]:
+    @staticmethod
+    def _copy_metadata(message: Dict[str, object]) -> Dict[str, object]:
+        metadata: Dict[str, object] = {}
+        for key in (
+            "width",
+            "height",
+            "model_name",
+            "percentage_complete",
+            "job_id",
+            "request_id",
+            "order",
+            "full_prompt",
+        ):
+            value = message.get(key)
+            if value is not None:
+                metadata[key] = value
+        return metadata
+
+    def _classify_image(self, message: Dict[str, object], final_min_bytes: int, medium_min_bytes: int) -> Optional[Dict[str, object]]:
+        url = str(message.get("url") or "")
+        blob = str(message.get("blob") or "")
         if not url or not blob:
             return None
 
@@ -70,7 +90,7 @@ class ImagineWebSocketReverse:
             else ("medium" if blob_size > medium_min_bytes else "preview")
         )
 
-        return {
+        result = {
             "type": "image",
             "image_id": image_id,
             "ext": ext,
@@ -81,6 +101,8 @@ class ImagineWebSocketReverse:
             "url": url,
             "is_final": is_final,
         }
+        result.update(self._copy_metadata(message))
+        return result
 
     def _build_request_message(self, request_id: str, prompt: str, aspect_ratio: str, enable_nsfw: bool) -> Dict[str, object]:
         return {
@@ -92,13 +114,15 @@ class ImagineWebSocketReverse:
                     {
                         "requestId": request_id,
                         "text": prompt,
-                        "type": "input_text",
+                        "type": "input_scroll",
                         "properties": {
                             "section_count": 0,
                             "is_kids_mode": False,
                             "enable_nsfw": enable_nsfw,
                             "skip_upsampler": False,
+                            "enable_side_by_side": True,
                             "is_initial": False,
+                            "last_prompt": prompt,
                             "aspect_ratio": aspect_ratio,
                         },
                     }
@@ -272,12 +296,7 @@ class ImagineWebSocketReverse:
                         msg_type = msg.get("type")
 
                         if msg_type == "image":
-                            info = self._classify_image(
-                                msg.get("url", ""),
-                                msg.get("blob", ""),
-                                final_min_bytes,
-                                medium_min_bytes,
-                            )
+                            info = self._classify_image(msg, final_min_bytes, medium_min_bytes)
                             if not info:
                                 continue
 

@@ -91,8 +91,10 @@ class ImagineWebSocketReverseTests(unittest.TestCase):
         blob = base64.b64encode(raw).decode()
 
         result = self.service._classify_image(
-            "https://example.com/images/abc123.jpg",
-            blob,
+            {
+                "url": "https://example.com/images/abc123.jpg",
+                "blob": blob,
+            },
             final_min_bytes=100000,
             medium_min_bytes=30000,
         )
@@ -107,8 +109,10 @@ class ImagineWebSocketReverseTests(unittest.TestCase):
         blob = base64.b64encode(raw).decode()
 
         result = self.service._classify_image(
-            "https://example.com/images/def456.jpg",
-            blob,
+            {
+                "url": "https://example.com/images/def456.jpg",
+                "blob": blob,
+            },
             final_min_bytes=100000,
             medium_min_bytes=30000,
         )
@@ -117,6 +121,51 @@ class ImagineWebSocketReverseTests(unittest.TestCase):
         self.assertTrue(result["is_final"])
         self.assertEqual("final", result["stage"])
         self.assertEqual(len(raw), result["blob_size"])
+
+    def test_classify_image_preserves_upstream_metadata(self):
+        raw = b"a" * 140000
+        blob = base64.b64encode(raw).decode()
+
+        result = self.service._classify_image(
+            {
+                "url": "https://example.com/images/xyz789.jpg",
+                "blob": blob,
+                "width": 720,
+                "height": 1280,
+                "model_name": "imagine-x-1",
+                "percentage_complete": 100,
+                "job_id": "job-1",
+                "request_id": "req-1",
+            },
+            final_min_bytes=100000,
+            medium_min_bytes=30000,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(720, result["width"])
+        self.assertEqual(1280, result["height"])
+        self.assertEqual("imagine-x-1", result["model_name"])
+        self.assertEqual(100, result["percentage_complete"])
+        self.assertEqual("job-1", result["job_id"])
+        self.assertEqual("req-1", result["request_id"])
+
+    def test_build_request_message_matches_browser_input_scroll_shape(self):
+        request = self.service._build_request_message(
+            "req-1",
+            "test prompt",
+            "9:16",
+            True,
+        )
+
+        content = request["item"]["content"][0]
+        self.assertEqual("conversation.item.create", request["type"])
+        self.assertEqual("message", request["item"]["type"])
+        self.assertEqual("input_scroll", content["type"])
+        self.assertEqual("req-1", content["requestId"])
+        self.assertEqual("test prompt", content["text"])
+        self.assertEqual("9:16", content["properties"]["aspect_ratio"])
+        self.assertTrue(content["properties"]["enable_side_by_side"])
+        self.assertEqual("test prompt", content["properties"]["last_prompt"])
 
 
 if __name__ == "__main__":
