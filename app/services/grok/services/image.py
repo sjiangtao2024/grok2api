@@ -351,7 +351,7 @@ class ImageGenerationService:
                     f"attempts={extra_attempts}"
                 )
 
-        if len(all_images) < n:
+        if len(all_images) < n and not all_images:
             logger.error(
                 f"Image generation failed after recovery attempts: finals={len(all_images)}/{n}, "
                 f"blocked_parallel_attempts={int(get_config('image.blocked_parallel_attempts') or 5)}"
@@ -363,6 +363,11 @@ class ImageGenerationService:
                     "final_images": len(all_images),
                     "requested": n,
                 },
+            )
+        if len(all_images) < n:
+            logger.warning(
+                "Returning partial image results after recovery attempts: "
+                f"available={len(all_images)}, requested={n}"
             )
 
         try:
@@ -394,10 +399,7 @@ class ImageGenerationService:
     def _select_images(images: List[str], n: int) -> List[str]:
         if len(images) >= n:
             return images[:n]
-        selected = images.copy()
-        while len(selected) < n:
-            selected.append("error")
-        return selected
+        return images.copy()
 
 
 class ImageWSBaseProcessor(BaseProcessor):
@@ -504,6 +506,8 @@ class ImageWSBaseProcessor(BaseProcessor):
             "request_id",
             "order",
             "full_prompt",
+            "stage",
+            "is_final",
         ):
             value = item.get(key)
             if value is not None:
@@ -793,7 +797,13 @@ class ImageWSCollectProcessor(ImageWSBaseProcessor):
         async for item in response:
             if item.get("type") == "error":
                 message = item.get("error") or "Upstream error"
-                raise UpstreamException(message, details=item)
+                if not images:
+                    raise UpstreamException(message, details=item)
+                logger.warning(
+                    "Upstream ended with error after returning image candidates; "
+                    "using best available image instead"
+                )
+                break
             if item.get("type") != "image":
                 continue
             image_id = item.get("image_id")
@@ -802,8 +812,11 @@ class ImageWSCollectProcessor(ImageWSBaseProcessor):
             images[image_id] = self._pick_best(images.get(image_id), item)
 
         selected = sorted(
-            [item for item in images.values() if item.get("is_final", False)],
-            key=lambda x: x.get("blob_size", 0),
+            images.values(),
+            key=lambda x: (
+                x.get("is_final", False),
+                x.get("blob_size", 0),
+            ),
             reverse=True,
         )
         if self.n:
