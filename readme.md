@@ -195,7 +195,7 @@ curl http://localhost:8000/v1/chat/completions \
 - `grok-imagine-1.0-fast` 与瀑布流 imagine 生成链路一致，可直接通过 `/v1/chat/completions` 调用；其 `n/size/response_format` 由服务端 `[imagine_fast]` 统一控制。
 - `grok-imagine-1.0-fast` 在 `/v1/chat/completions` 的流式输出仅返回最终成图，不返回中间预览图。
 - `grok-imagine-1.0-fast` 流式 URL 出图会保持原始图片名（不追加 `-final` 后缀）。
-- 当图片疑似被审查拦截导致无最终图时，若开启 `image.blocked_parallel_enabled`，服务端会按 `image.blocked_parallel_attempts` 自动并行补偿生成，并优先使用不同 token；若仍无满足 `image.final_min_bytes` 的最终图则返回失败。
+- 当图片疑似被审查拦截导致无最终图时，若开启 `image.blocked_parallel_enabled`，服务端会按 `image.blocked_parallel_attempts` 自动并行补偿生成，并优先使用不同 token；若仍无满足 `image.final_min_bytes` 的最终图则返回失败。`image.final_min_bytes` / `image.medium_min_bytes` 按 base64 解码后的真实图片字节数计算。
 - `grok-imagine-1.0-edit` 必须提供图片，多图默认取**最后 3 张**与最后一个文本。
 - `grok-imagine-1.0-video` 支持文生视频与图生视频（通过 `image_url` 传参考图，**仅取第 1 张**）。
 - 除上述外的其他参数将自动丢弃并忽略。
@@ -441,8 +441,8 @@ curl http://localhost:8000/v1/videos \
 |  | `final_timeout` | 最终图超时 | 收到中等图后等待最终图的超时秒数。 | `15` |
 |  | `blocked_grace_seconds` | 审查宽限秒数 | 收到中等图后，判定疑似被审查的宽限秒数。 | `10` |
 |  | `nsfw` | NSFW 模式 | WebSocket 请求是否启用 NSFW。 | `true` |
-|  | `medium_min_bytes` | 中等图最小字节 | 判定中等质量图的最小字节数。 | `30000` |
-|  | `final_min_bytes` | 最终图最小字节 | 判定最终图的最小字节数（通常 JPG > 100KB）。 | `100000` |
+|  | `medium_min_bytes` | 中等图最小字节 | 判定中等质量图的最小字节数（按 base64 解码后的真实图片字节数）。 | `30000` |
+|  | `final_min_bytes` | 最终图最小字节 | 判定最终图的最小字节数（按 base64 解码后的真实图片字节数，通常 JPG > 100KB）。 | `100000` |
 |  | `blocked_parallel_attempts` | 并行补偿次数 | 遇到疑似审查/拦截时的并行补偿生成次数。 | `5` |
 |  | `blocked_parallel_enabled` | 并行补偿开关 | 是否启用并行补偿（启用时优先使用不同 token）。 | `true` |
 | **imagine_fast** | `n` | 生成数量 | 仅对 grok-imagine-1.0-fast 生效。 | `1` |

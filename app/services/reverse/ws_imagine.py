@@ -3,6 +3,8 @@ Reverse interface: Imagine WebSocket image stream.
 """
 
 import asyncio
+import base64
+import binascii
 import orjson
 import re
 import time
@@ -36,10 +38,21 @@ class ImagineWebSocketReverse:
             return None, None
         return match.group(1), match.group(2).lower()
 
-    def _is_final_image(self, url: str, blob_size: int, final_min_bytes: int) -> bool:
+    def _decoded_blob_size(self, blob: str) -> int:
+        if not blob:
+            return 0
+        data = blob
+        if "," in blob and "base64" in blob.split(",", 1)[0]:
+            data = blob.split(",", 1)[1]
+        try:
+            return len(base64.b64decode(data, validate=False))
+        except (ValueError, binascii.Error):
+            return 0
+
+    def _is_final_image(self, decoded_size: int, final_min_bytes: int) -> bool:
         # Final image must satisfy byte-size threshold to avoid tiny preview
         # images being treated as final outputs.
-        return blob_size >= final_min_bytes
+        return decoded_size >= final_min_bytes
 
     def _classify_image(self, url: str, blob: str, final_min_bytes: int, medium_min_bytes: int) -> Optional[Dict[str, object]]:
         if not url or not blob:
@@ -47,8 +60,9 @@ class ImagineWebSocketReverse:
 
         image_id, ext = self._parse_image_url(url)
         image_id = image_id or uuid.uuid4().hex
-        blob_size = len(blob)
-        is_final = self._is_final_image(url, blob_size, final_min_bytes)
+        encoded_size = len(blob)
+        blob_size = self._decoded_blob_size(blob)
+        is_final = self._is_final_image(blob_size, final_min_bytes)
 
         stage = (
             "final"
@@ -63,6 +77,7 @@ class ImagineWebSocketReverse:
             "stage": stage,
             "blob": blob,
             "blob_size": blob_size,
+            "encoded_blob_size": encoded_size,
             "url": url,
             "is_final": is_final,
         }
@@ -274,7 +289,9 @@ class ImagineWebSocketReverse:
                                 final_ids.add(image_id)
                                 completed += 1
                                 logger.debug(
-                                    f"Final image received: id={image_id}, size={info['blob_size']}"
+                                    "Final image received: "
+                                    f"id={image_id}, decoded_size={info['blob_size']}, "
+                                    f"encoded_size={info.get('encoded_blob_size', 0)}"
                                 )
 
                             yield info

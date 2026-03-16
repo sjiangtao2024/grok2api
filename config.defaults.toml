@@ -120,9 +120,9 @@ final_timeout = 15
 blocked_grace_seconds = 10
 # 是否启用 NSFW
 nsfw = true
-# 判定为中等质量图的最小字节数
+# 判定为中等质量图的最小字节数（base64 解码后的真实图片字节数）
 medium_min_bytes = 30000
-# 判定为最终图的最小字节数
+# 判定为最终图的最小字节数（base64 解码后的真实图片字节数）
 final_min_bytes = 100000
 # 遇到疑似审查/拦截时的并行补偿生成次数
 blocked_parallel_attempts = 5
