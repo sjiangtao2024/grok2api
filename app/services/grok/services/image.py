@@ -11,12 +11,24 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, AsyncIterable, Dict, List, Optional, Tuple, Union
 
 import orjson
+from curl_cffi.requests.errors import RequestsError
 
 from app.core.config import get_config
 from app.core.logger import logger
 from app.core.storage import DATA_DIR
-from app.core.exceptions import AppException, ErrorType, UpstreamException
-from app.services.grok.utils.process import BaseProcessor
+from app.core.exceptions import (
+    AppException,
+    ErrorType,
+    StreamIdleTimeoutError,
+    UpstreamException,
+)
+from app.services.grok.services.chat import GrokChatService
+from app.services.grok.utils.process import (
+    BaseProcessor,
+    _is_http2_error,
+    _normalize_line,
+    _with_idle_timeout,
+)
 from app.services.grok.utils.retry import pick_token, rate_limited
 from app.services.grok.utils.response import make_response_id, make_chat_chunk, wrap_image_content
 from app.services.grok.utils.stream import wrap_stream_with_usage
@@ -52,6 +64,7 @@ class ImageGenerationService:
         stream: bool,
         enable_nsfw: Optional[bool] = None,
         chat_format: bool = False,
+        return_all_candidates: bool = False,
     ) -> ImageGenerationResult:
         max_token_retries = int(get_config("retry.max_retry") or 3)
         tried_tokens: set[str] = set()
@@ -88,7 +101,7 @@ class ImageGenerationService:
                     tried_tokens.add(current_token)
                     yielded = False
                     try:
-                        result = await self._stream_ws(
+                        result = await self._stream_chat(
                             token_mgr=token_mgr,
                             token=current_token,
                             model_info=model_info,
@@ -99,6 +112,7 @@ class ImageGenerationService:
                             aspect_ratio=aspect_ratio,
                             enable_nsfw=enable_nsfw,
                             chat_format=chat_format,
+                            return_all_candidates=return_all_candidates,
                         )
                         async for chunk in result.data:
                             yielded = True
@@ -149,7 +163,7 @@ class ImageGenerationService:
 
             tried_tokens.add(current_token)
             try:
-                return await self._collect_ws(
+                return await self._collect_chat(
                     token_mgr=token_mgr,
                     token=current_token,
                     model_info=model_info,
@@ -159,6 +173,7 @@ class ImageGenerationService:
                     response_format=response_format,
                     aspect_ratio=aspect_ratio,
                     enable_nsfw=enable_nsfw,
+                    return_all_candidates=return_all_candidates,
                 )
             except UpstreamException as e:
                 last_error = e
@@ -176,11 +191,38 @@ class ImageGenerationService:
         raise AppException(
             message="No available tokens. Please try again later.",
             error_type=ErrorType.RATE_LIMIT.value,
-            code="rate_limit_exceeded",
-            status_code=429,
+                    code="rate_limit_exceeded",
+                    status_code=429,
+                )
+
+    @staticmethod
+    def _tool_overrides() -> Dict[str, Any]:
+        return {"imageGen": True}
+
+    @staticmethod
+    def _model_config_override() -> Dict[str, Any]:
+        # Frontend fetchGenerateImages currently uses this model override when
+        # driving image generation via the app-chat streaming endpoint.
+        return {"modelMap": {"imageEditModel": "imagine"}}
+
+    async def _request_stream(
+        self,
+        *,
+        token: str,
+        prompt: str,
+        model_info: Any,
+    ) -> AsyncIterable[bytes]:
+        return await GrokChatService().chat(
+            token=token,
+            message=prompt,
+            model=model_info.grok_model,
+            mode=None,
+            stream=True,
+            tool_overrides=self._tool_overrides(),
+            model_config_override=self._model_config_override(),
         )
 
-    async def _stream_ws(
+    async def _stream_chat(
         self,
         *,
         token_mgr: Any,
@@ -193,26 +235,23 @@ class ImageGenerationService:
         aspect_ratio: str,
         enable_nsfw: Optional[bool] = None,
         chat_format: bool = False,
+        return_all_candidates: bool = False,
     ) -> ImageGenerationResult:
         if enable_nsfw is None:
             enable_nsfw = bool(get_config("image.nsfw"))
-        stream_retries = int(get_config("image.blocked_parallel_attempts") or 5) + 1
-        stream_retries = max(1, min(stream_retries, 10))
-        upstream = image_service.stream(
+        upstream = await self._request_stream(
             token=token,
             prompt=prompt,
-            aspect_ratio=aspect_ratio,
-            n=n,
-            enable_nsfw=enable_nsfw,
-            max_retries=stream_retries,
+            model_info=model_info,
         )
-        processor = ImageWSStreamProcessor(
+        processor = ImageChatStreamProcessor(
             model_info.model_id,
             token,
             n=n,
             response_format=response_format,
             size=size,
             chat_format=chat_format,
+            return_all_candidates=return_all_candidates,
         )
         stream = wrap_stream_with_usage(
             processor.process(upstream),
@@ -222,7 +261,7 @@ class ImageGenerationService:
         )
         return ImageGenerationResult(stream=True, data=stream)
 
-    async def _collect_ws(
+    async def _collect_chat(
         self,
         *,
         token_mgr: Any,
@@ -234,32 +273,29 @@ class ImageGenerationService:
         response_format: str,
         aspect_ratio: str,
         enable_nsfw: Optional[bool] = None,
+        return_all_candidates: bool = False,
     ) -> ImageGenerationResult:
         if enable_nsfw is None:
             enable_nsfw = bool(get_config("image.nsfw"))
         all_images: List[str] = []
         all_metadata: Dict[str, Dict[str, object]] = {}
         seen = set()
-        expected_per_call = 6
+        expected_per_call = 2
         calls_needed = max(1, int(math.ceil(n / expected_per_call)))
         calls_needed = min(calls_needed, n)
 
         async def _fetch_batch(call_target: int, call_token: str):
-            stream_retries = int(get_config("image.blocked_parallel_attempts") or 5) + 1
-            stream_retries = max(1, min(stream_retries, 10))
-            upstream = image_service.stream(
+            upstream = await self._request_stream(
                 token=call_token,
                 prompt=prompt,
-                aspect_ratio=aspect_ratio,
-                n=call_target,
-                enable_nsfw=enable_nsfw,
-                max_retries=stream_retries,
+                model_info=model_info,
             )
-            processor = ImageWSCollectProcessor(
+            processor = ImageChatCollectProcessor(
                 model_info.model_id,
-                token,
+                call_token,
                 n=call_target,
                 response_format=response_format,
+                return_all_candidates=return_all_candidates,
             )
             return await processor.process(upstream)
 
@@ -274,12 +310,11 @@ class ImageGenerationService:
             if isinstance(batch, Exception):
                 logger.warning(f"WS batch failed: {batch}")
                 continue
-            batch_images, batch_metadata = batch
-            for img, meta in zip(batch_images, batch_metadata):
+            for img in batch:
                 if img not in seen:
                     seen.add(img)
                     all_images.append(img)
-                    all_metadata[img] = meta
+                    all_metadata[img] = {}
                 if len(all_images) >= n:
                     break
             if len(all_images) >= n:
@@ -336,12 +371,11 @@ class ImageGenerationService:
                     if isinstance(batch, Exception):
                         logger.warning(f"WS recovery batch failed: {batch}")
                         continue
-                    batch_images, batch_metadata = batch
-                    for img, meta in zip(batch_images, batch_metadata):
+                    for img in batch:
                         if img not in seen:
                             seen.add(img)
                             all_images.append(img)
-                            all_metadata[img] = meta
+                            all_metadata[img] = {}
                         if len(all_images) >= n:
                             break
                     if len(all_images) >= n:
@@ -357,9 +391,9 @@ class ImageGenerationService:
                 f"blocked_parallel_attempts={int(get_config('image.blocked_parallel_attempts') or 5)}"
             )
             raise UpstreamException(
-                "Image generation blocked or no valid final image",
+                "Image generation returned no final image",
                 details={
-                    "error_code": "blocked_no_final_image",
+                    "error_code": "empty_result",
                     "final_images": len(all_images),
                     "requested": n,
                 },
@@ -400,6 +434,307 @@ class ImageGenerationService:
         if len(images) >= n:
             return images[:n]
         return images.copy()
+
+
+class ImageChatBaseProcessor(BaseProcessor):
+    """App-chat image processor base."""
+
+    def __init__(self, model: str, token: str = "", response_format: str = "b64_json"):
+        if response_format == "base64":
+            response_format = "b64_json"
+        super().__init__(model, token)
+        self.response_format = response_format
+        if response_format == "url":
+            self.response_field = "url"
+        elif response_format == "base64":
+            self.response_field = "base64"
+        else:
+            self.response_field = "b64_json"
+
+    async def _to_output(self, image_url: str) -> str:
+        if self.response_format == "url":
+            return await self.process_url(image_url, "image")
+        dl_service = self._get_dl()
+        base64_data = await dl_service.parse_b64(image_url, self.token, "image")
+        if "," in base64_data:
+            return base64_data.split(",", 1)[1]
+        return base64_data
+
+    @staticmethod
+    def _read_response(line: Any) -> Dict[str, Any]:
+        normalized = _normalize_line(line)
+        if not normalized:
+            return {}
+        try:
+            data = orjson.loads(normalized)
+        except orjson.JSONDecodeError:
+            return {}
+        return data.get("result", {}).get("response", {}) or {}
+
+
+class ImageChatStreamProcessor(ImageChatBaseProcessor):
+    """App-chat image stream processor."""
+
+    def __init__(
+        self,
+        model: str,
+        token: str = "",
+        n: int = 1,
+        response_format: str = "b64_json",
+        size: str = "1024x1024",
+        chat_format: bool = False,
+        return_all_candidates: bool = False,
+    ):
+        super().__init__(model, token, response_format=response_format)
+        self.n = n
+        self.size = size
+        self.chat_format = chat_format
+        self.return_all_candidates = return_all_candidates
+        self._id_generated = False
+        self._response_id = ""
+        self._order: Dict[str, int] = {}
+        self._target_id: Optional[str] = None
+
+    def _index_for(self, image_id: str) -> Optional[int]:
+        if self.n == 1:
+            if self._target_id is None:
+                self._target_id = image_id
+                self._order[image_id] = 0
+            if image_id != self._target_id:
+                return None
+            return 0
+
+        if image_id not in self._order:
+            next_index = len(self._order)
+            if next_index >= self.n:
+                return None
+            self._order[image_id] = next_index
+        return self._order[image_id]
+
+    def _sse(self, event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {orjson.dumps(data).decode()}\n\n"
+
+    async def process(self, response: AsyncIterable[bytes]) -> AsyncGenerator[str, None]:
+        emitted_chat_chunk = False
+        idle_timeout = get_config("image.stream_timeout")
+        emitted_final: set[str] = set()
+        emitted_progress: Dict[str, int] = {}
+        best_by_id: Dict[str, Dict[str, Any]] = {}
+
+        try:
+            async for line in _with_idle_timeout(response, idle_timeout, self.model):
+                resp = self._read_response(line)
+                if not resp:
+                    continue
+
+                img = resp.get("streamingImageGenerationResponse")
+                if not isinstance(img, dict):
+                    continue
+
+                image_id = img.get("imageId")
+                image_url = img.get("imageUrl")
+                progress = int(img.get("progress") or 0)
+                if not image_id or not image_url:
+                    continue
+
+                index = self._index_for(image_id)
+                if index is None:
+                    continue
+
+                best = best_by_id.get(image_id)
+                if best is None or progress >= int(best.get("progress") or 0):
+                    best_by_id[image_id] = {
+                        "image_id": image_id,
+                        "image_url": image_url,
+                        "progress": progress,
+                    }
+
+                if progress < 100:
+                    if emitted_progress.get(image_id) == progress:
+                        continue
+                    emitted_progress[image_id] = progress
+                    if self.chat_format:
+                        continue
+                    yield self._sse(
+                        "image_generation.partial_image",
+                        {
+                            "type": "image_generation.partial_image",
+                            self.response_field: "",
+                            "index": index,
+                            "progress": progress,
+                        },
+                    )
+                    continue
+
+                if image_id in emitted_final:
+                    continue
+
+                output = await self._to_output(image_url)
+                if not output:
+                    continue
+                emitted_final.add(image_id)
+
+                if self.chat_format and output:
+                    output = wrap_image_content(output, self.response_format)
+
+                if not self._id_generated:
+                    self._response_id = make_response_id()
+                    self._id_generated = True
+
+                if self.chat_format:
+                    emitted_chat_chunk = True
+                    yield self._sse(
+                        "chat.completion.chunk",
+                        make_chat_chunk(
+                            self._response_id,
+                            self.model,
+                            output,
+                            index=index,
+                            is_final=True,
+                        ),
+                    )
+                else:
+                    yield self._sse(
+                        "image_generation.completed",
+                        {
+                            "type": "image_generation.completed",
+                            self.response_field: output,
+                            "created_at": int(time.time()),
+                            "size": self.size,
+                            "index": index,
+                            "image_id": image_id,
+                            "stage": "final",
+                            "usage": {
+                                "total_tokens": 0,
+                                "input_tokens": 0,
+                                "output_tokens": 0,
+                                "input_tokens_details": {
+                                    "text_tokens": 0,
+                                    "image_tokens": 0,
+                                },
+                            },
+                        },
+                    )
+
+            if self.chat_format:
+                if not self._id_generated:
+                    self._response_id = make_response_id()
+                    self._id_generated = True
+                if not emitted_chat_chunk:
+                    yield self._sse(
+                        "chat.completion.chunk",
+                        make_chat_chunk(
+                            self._response_id,
+                            self.model,
+                            "",
+                            index=0,
+                            is_final=True,
+                        ),
+                    )
+                yield "data: [DONE]\n\n"
+        except asyncio.CancelledError:
+            logger.debug("Image stream cancelled by client")
+        except StreamIdleTimeoutError as e:
+            raise UpstreamException(
+                message=f"Image stream idle timeout after {e.idle_seconds}s",
+                status_code=504,
+                details={
+                    "error": str(e),
+                    "type": "stream_idle_timeout",
+                    "idle_seconds": e.idle_seconds,
+                },
+            )
+        except RequestsError as e:
+            if _is_http2_error(e):
+                logger.warning(f"HTTP/2 stream error in image: {e}")
+                raise UpstreamException(
+                    message="Upstream connection closed unexpectedly",
+                    status_code=502,
+                    details={"error": str(e), "type": "http2_stream_error"},
+                )
+            logger.error(f"Image stream request error: {e}")
+            raise UpstreamException(
+                message=f"Upstream request failed: {e}",
+                status_code=502,
+                details={"error": str(e)},
+            )
+        finally:
+            await self.close()
+
+
+class ImageChatCollectProcessor(ImageChatBaseProcessor):
+    """App-chat image non-stream processor."""
+
+    def __init__(
+        self,
+        model: str,
+        token: str = "",
+        n: int = 1,
+        response_format: str = "b64_json",
+        return_all_candidates: bool = False,
+    ):
+        super().__init__(model, token, response_format=response_format)
+        self.n = n
+        self.return_all_candidates = return_all_candidates
+        self._order: Dict[str, int] = {}
+
+    async def process(self, response: AsyncIterable[bytes]) -> List[str]:
+        best_by_id: Dict[str, Dict[str, Any]] = {}
+        idle_timeout = get_config("image.stream_timeout")
+
+        try:
+            async for line in _with_idle_timeout(response, idle_timeout, self.model):
+                resp = self._read_response(line)
+                if not resp:
+                    continue
+
+                img = resp.get("streamingImageGenerationResponse")
+                if not isinstance(img, dict):
+                    continue
+
+                image_id = img.get("imageId")
+                image_url = img.get("imageUrl")
+                progress = int(img.get("progress") or 0)
+                if not image_id or not image_url:
+                    continue
+
+                if image_id not in self._order:
+                    self._order[image_id] = len(self._order)
+
+                current = best_by_id.get(image_id)
+                if current is None or progress >= int(current.get("progress") or 0):
+                    best_by_id[image_id] = {
+                        "image_id": image_id,
+                        "image_url": image_url,
+                        "progress": progress,
+                        "order": self._order[image_id],
+                    }
+        except asyncio.CancelledError:
+            logger.debug("Image collect cancelled by client")
+        except StreamIdleTimeoutError as e:
+            logger.warning(f"Image collect idle timeout: {e}")
+        except RequestsError as e:
+            if _is_http2_error(e):
+                logger.warning(f"HTTP/2 stream error in image collect: {e}")
+            else:
+                logger.error(f"Image collect request error: {e}")
+        finally:
+            await self.close()
+
+        selected = sorted(
+            best_by_id.values(),
+            key=lambda item: (item.get("progress", 0) >= 100, item.get("progress", 0), -item.get("order", 0)),
+            reverse=True,
+        )
+        if self.n and not self.return_all_candidates:
+            selected = selected[: self.n]
+
+        results: List[str] = []
+        for item in selected:
+            output = await self._to_output(item.get("image_url", ""))
+            if output:
+                results.append(output)
+        return results
 
 
 class ImageWSBaseProcessor(BaseProcessor):

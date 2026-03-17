@@ -58,6 +58,7 @@ class ImageEditService:
         response_format: str,
         stream: bool,
         chat_format: bool = False,
+        return_all_candidates: bool = False,
     ) -> ImageEditResult:
         if len(images) > 3:
             logger.info(
@@ -142,6 +143,7 @@ class ImageEditService:
                     response_format=response_format,
                     tool_overrides=tool_overrides,
                     model_config_override=model_config_override,
+                    return_all_candidates=return_all_candidates,
                 )
                 try:
                     effort = (
@@ -238,6 +240,7 @@ class ImageEditService:
         response_format: str,
         tool_overrides: dict,
         model_config_override: dict,
+        return_all_candidates: bool = False,
     ) -> List[str]:
         calls_needed = (n + 1) // 2
 
@@ -283,6 +286,9 @@ class ImageEditService:
             raise UpstreamException(
                 "Image edit returned no results", details={"error": "empty_result"}
             )
+
+        if return_all_candidates:
+            return all_images
 
         if len(all_images) >= n:
             return all_images[:n]

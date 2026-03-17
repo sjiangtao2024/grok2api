@@ -6,6 +6,7 @@
 """
 
 from copy import deepcopy
+import os
 from pathlib import Path
 from typing import Any, Dict
 import tomllib
@@ -233,6 +234,15 @@ def _load_defaults() -> Dict[str, Any]:
         return {}
 
 
+def _runtime_base_proxy_url() -> str:
+    """Resolve runtime proxy fallback from environment variables."""
+    for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
 class Config:
     """配置管理器"""
 
@@ -328,6 +338,15 @@ class Config:
                 logger.warning(
                     "Skip persisting defaults: empty config source detected, keep runtime merged config only."
                 )
+
+            proxy_section = merged.setdefault("proxy", {})
+            if not proxy_section.get("base_proxy_url"):
+                env_proxy = _runtime_base_proxy_url()
+                if env_proxy:
+                    proxy_section["base_proxy_url"] = env_proxy
+                    logger.info(
+                        "Using runtime proxy fallback from environment for proxy.base_proxy_url"
+                    )
 
             self._config = merged
         except Exception as e:

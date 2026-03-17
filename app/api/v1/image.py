@@ -53,6 +53,9 @@ class ImageGenerationRequest(BaseModel):
     response_format: Optional[str] = Field(None, description="响应格式")
     style: Optional[str] = Field(None, description="风格 (暂不支持)")
     stream: Optional[bool] = Field(False, description="是否流式输出")
+    return_all_candidates: Optional[bool] = Field(
+        False, description="调试模式: 返回当前上游调用收集到的全部候选"
+    )
 
 
 class ImageEditRequest(BaseModel):
@@ -70,6 +73,9 @@ class ImageEditRequest(BaseModel):
     response_format: Optional[str] = Field(None, description="响应格式")
     style: Optional[str] = Field(None, description="风格 (暂不支持)")
     stream: Optional[bool] = Field(False, description="是否流式输出")
+    return_all_candidates: Optional[bool] = Field(
+        False, description="调试模式: 返回当前上游调用收集到的全部候选"
+    )
 
 
 def _validate_common_request(
@@ -304,6 +310,7 @@ async def create_image(request: ImageGenerationRequest):
         size=request.size,
         aspect_ratio=aspect_ratio,
         stream=bool(request.stream),
+        return_all_candidates=bool(request.return_all_candidates),
     )
 
     if result.stream:
@@ -345,6 +352,7 @@ async def edit_image(
     response_format: Optional[str] = Form(None),
     style: Optional[str] = Form(None),
     stream: Optional[bool] = Form(False),
+    return_all_candidates: Optional[bool] = Form(False),
 ):
     """
     Image Edits API
@@ -364,6 +372,7 @@ async def edit_image(
             response_format=response_format,
             style=style,
             stream=stream,
+            return_all_candidates=return_all_candidates,
         )
     except ValidationError as exc:
         errors = exc.errors()
@@ -443,6 +452,7 @@ async def edit_image(
         n=edit_request.n,
         response_format=response_format,
         stream=bool(edit_request.stream),
+        return_all_candidates=bool(edit_request.return_all_candidates),
     )
 
     if result.stream:

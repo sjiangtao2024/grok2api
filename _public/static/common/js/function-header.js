@@ -26,7 +26,9 @@ async function loadFunctionHeader() {
     const links = container.querySelectorAll('a[data-nav]');
     links.forEach((link) => {
       const target = link.getAttribute('data-nav') || '';
-      if (target && path.startsWith(target)) {
+      const isExact = path === target;
+      const isNested = target && path.startsWith(`${target}/`);
+      if (target && (isExact || isNested)) {
         link.classList.add('active');
       }
     });

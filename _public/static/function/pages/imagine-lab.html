@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Grok2API - Imagine Lab</title>
+  <link rel="icon" href="/favicon.ico">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-mono/style.css" rel="stylesheet">
+  <link href="/static/common/css/common.css?v=1.6.1" rel="stylesheet">
+  <link href="/static/function/css/imagine-lab.css?v=1.6.1" rel="stylesheet">
+  <link href="/static/common/css/toast.css" rel="stylesheet">
+</head>
+
+<body class="min-h-screen flex flex-col" style="background-color: var(--bg);">
+  <div id="toast-container" class="toast-container"></div>
+  <div id="app-header"></div>
+
+  <main class="flex-1 container mx-auto max-w-6xl px-6 py-8 fade-in">
+    <div class="space-y-6">
+      <section class="lab-hero">
+        <div class="lab-hero-copy">
+          <span class="hero-kicker">IMAGINE LAB</span>
+          <h1 class="lab-title">图片生成与编辑调试页</h1>
+          <p class="lab-subtitle">默认使用 <code>b64_json</code> 验证真实图像字节返回，避免 URL 过期、鉴权和 CORS 干扰。</p>
+        </div>
+        <div class="lab-hero-meta">
+          <div class="hero-badge">
+            <span class="hero-badge-label">Primary</span>
+            <strong>b64_json</strong>
+          </div>
+          <div class="hero-badge">
+            <span class="hero-badge-label">Endpoints</span>
+            <strong>/v1/function/images/*</strong>
+          </div>
+        </div>
+      </section>
+
+      <div class="lab-layout">
+        <section class="lab-panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Generate</div>
+              <div class="panel-subtitle">直接调用图片生成接口</div>
+            </div>
+            <button id="generateBtn" class="geist-button" type="button">生成图片</button>
+          </div>
+
+          <div class="field-stack">
+            <label class="field-label" for="generatePrompt">Prompt</label>
+            <textarea id="generatePrompt" class="geist-input lab-textarea" placeholder="例如：cinematic portrait of a silver fox astronaut, high detail, soft rim light"></textarea>
+          </div>
+
+          <div class="field-grid">
+            <div>
+              <label class="field-label" for="generateSize">Size</label>
+              <select id="generateSize" class="geist-input">
+                <option value="1024x1024" selected>1024x1024</option>
+                <option value="1024x1792">1024x1792</option>
+                <option value="1792x1024">1792x1024</option>
+                <option value="720x1280">720x1280</option>
+                <option value="1280x720">1280x720</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label" for="generateCount">Count</label>
+              <select id="generateCount" class="geist-input">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4" selected>4</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label" for="responseFormat">Response</label>
+              <select id="responseFormat" class="geist-input">
+                <option value="b64_json" selected>b64_json</option>
+                <option value="url">url</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="lab-note">
+            <strong>调试说明</strong>
+            <span>Count 决定目标候选数。这个页面默认开启 <code>return_all_candidates</code>，所以单次上游调用里返回几张，我们就显示几张；如果单次只回 1 张，就会继续通过更多调用补齐候选。标准 API 默认仍按 n 截断。</span>
+          </div>
+        </section>
+
+        <section class="lab-panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Edit</div>
+              <div class="panel-subtitle">上传参考图或复用上一张生成结果</div>
+            </div>
+            <button id="editBtn" class="geist-button-outline" type="button">编辑图片</button>
+          </div>
+
+          <div class="field-stack">
+            <label class="field-label" for="editPrompt">Edit Prompt</label>
+            <textarea id="editPrompt" class="geist-input lab-textarea" placeholder="例如：turn this into a retro magazine cover, add bold typography and warm paper texture"></textarea>
+          </div>
+
+          <div class="field-grid">
+            <div>
+              <label class="field-label" for="editSize">Size</label>
+              <select id="editSize" class="geist-input">
+                <option value="1024x1024" selected>1024x1024</option>
+                <option value="1024x1792">1024x1792</option>
+                <option value="1792x1024">1792x1024</option>
+                <option value="720x1280">720x1280</option>
+                <option value="1280x720">1280x720</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label" for="editCount">Count</label>
+              <select id="editCount" class="geist-input">
+                <option value="1">1</option>
+                <option value="2" selected>2</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label" for="editImageInput">Reference</label>
+              <input id="editImageInput" class="geist-input file-input" type="file" accept="image/png,image/jpeg,image/webp">
+            </div>
+          </div>
+
+          <div class="edit-source-row">
+            <button id="reuseLastBtn" class="geist-button-outline" type="button">复用上一张结果</button>
+            <button id="clearEditSourceBtn" class="geist-button-outline" type="button">清空参考图</button>
+            <span id="editSourceLabel" class="source-label">当前未选择参考图</span>
+          </div>
+
+          <div class="lab-note">
+            <strong>编辑候选</strong>
+            <span>编辑链路同样默认开启 <code>return_all_candidates</code>。如果一次编辑流里出现多张候选图，Preview 会全部展示；如果上游本次只给 1 张，页面仍然只会拿到 1 张。</span>
+          </div>
+        </section>
+      </div>
+
+      <section class="lab-panel status-panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">Run Status</div>
+            <div class="panel-subtitle">记录请求、响应和错误，方便确认链路是否正常</div>
+          </div>
+          <div id="statusBadge" class="status-badge idle">Idle</div>
+        </div>
+
+        <div class="status-grid">
+          <div class="status-card">
+            <span class="status-label">Last Action</span>
+            <strong id="lastActionValue">-</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Image Count</span>
+            <strong id="imageCountValue">0</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">First Payload</span>
+            <strong id="payloadSizeValue">0 chars</strong>
+          </div>
+          <div class="status-card">
+            <span class="status-label">Elapsed</span>
+            <strong id="elapsedValue">-</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="lab-layout">
+        <section class="lab-panel preview-panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Preview</div>
+              <div class="panel-subtitle">返回的图片会直接在这里落地展示</div>
+            </div>
+            <button id="clearResultsBtn" class="geist-button-outline" type="button">清空结果</button>
+          </div>
+
+          <div id="resultsEmpty" class="results-empty">等待第一次请求。</div>
+          <div id="resultsGrid" class="results-grid"></div>
+        </section>
+
+        <section class="lab-panel payload-panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">Payloads</div>
+              <div class="panel-subtitle">保留本次请求和原始响应，排查最直接</div>
+            </div>
+          </div>
+
+          <div class="payload-block">
+            <div class="payload-label">Request</div>
+            <pre id="requestJson" class="payload-pre">{}</pre>
+          </div>
+          <div class="payload-block">
+            <div class="payload-label">Response</div>
+            <pre id="responseJson" class="payload-pre">{}</pre>
+          </div>
+          <div class="payload-block">
+            <div class="payload-label">Error</div>
+            <pre id="errorJson" class="payload-pre is-error">No errors</pre>
+          </div>
+        </section>
+      </section>
+    </div>
+  </main>
+
+  <div id="app-footer"></div>
+
+  <script src="/static/i18n/i18n.js"></script>
+  <script src="/static/common/js/admin-auth.js?v=1.6.1"></script>
+  <script src="/static/common/js/function-header.js?v=1.6.1"></script>
+  <script src="/static/common/js/footer.js?v=1.6.1"></script>
+  <script src="/static/common/js/toast.js"></script>
+  <script src="/static/function/js/imagine-lab-utils.js?v=1.6.1"></script>
+  <script src="/static/function/js/imagine-lab.js?v=1.6.1"></script>
+</body>
+
+</html>

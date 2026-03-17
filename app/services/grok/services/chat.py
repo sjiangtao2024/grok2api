@@ -98,7 +98,12 @@ def extract_tool_text(raw: str, rollout_id: str = "") -> str:
 
 def _get_chat_semaphore() -> asyncio.Semaphore:
     global _CHAT_SEMAPHORE, _CHAT_SEM_VALUE
-    value = max(1, int(get_config("chat.concurrent")))
+    raw_value = get_config("chat.concurrent")
+    try:
+        value = max(1, int(raw_value or 1))
+    except (TypeError, ValueError):
+        logger.warning(f"Invalid chat.concurrent={raw_value!r}, fallback to 1")
+        value = 1
     if value != _CHAT_SEM_VALUE:
         _CHAT_SEM_VALUE = value
         _CHAT_SEMAPHORE = asyncio.Semaphore(value)

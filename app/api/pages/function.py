@@ -37,6 +37,13 @@ async def function_imagine():
     return _function_page_response("function/pages/imagine.html")
 
 
+@router.get("/imagine-lab", include_in_schema=False)
+async def function_imagine_lab():
+    if not is_function_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+    return _function_page_response("function/pages/imagine-lab.html")
+
+
 @router.get("/voice", include_in_schema=False)
 async def function_voice():
     if not is_function_enabled():

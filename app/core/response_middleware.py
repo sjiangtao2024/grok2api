@@ -31,6 +31,7 @@ class ResponseLoggerMiddleware(BaseHTTPMiddleware):
             "/",
             "/login",
             "/imagine",
+            "/imagine-lab",
             "/voice",
             "/admin",
             "/admin/login",
